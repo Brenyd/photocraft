@@ -100,11 +100,14 @@ fn custom_titlebar(prefs_file: Option<&std::path::Path>) -> bool {
 /// System Info's HDR output line (when HDR output was asked for): on, or why the window stayed
 /// SDR. `wayland` is `Some` on Linux (whether the window is a native Wayland one).
 fn hdr_status(active: bool, backend: eframe::wgpu::Backend, wayland: Option<bool>) -> String {
+    if active && wayland == Some(false) {
+        return "off: the window is on X11/Xwayland, which shows HDR surfaces as SDR".into();
+    }
     if active {
         return "on (scRGB, extended-range linear)".into();
     }
     let why = if wayland == Some(false) {
-        "HDR needs a Wayland session (this window is on X11 or Xwayland)"
+        "HDR needs a native Wayland window (set Preferences › Performance › Linux Display Server to Auto)"
     } else if wayland.is_some() && backend != eframe::wgpu::Backend::Vulkan {
         "HDR needs the Vulkan backend (Preferences › Performance › Graphics Backend)"
     } else if backend == eframe::wgpu::Backend::Gl {
@@ -258,8 +261,13 @@ fn main() -> eframe::Result {
     // app no pen input (#639).
     #[cfg(target_os = "linux")]
     let native_session = linux_libs::session_from_env(|name| std::env::var(name).ok());
+    // Preferences › Performance › HDR Output (or `PHOTOCRAFT_HDR`): read before the display server
+    // is chosen, because only a native Wayland window can present HDR on Linux.
+    let hdr_wanted = gpu_startup::read_hdr_output(services::prefs_file().as_deref(), std::env::var("PHOTOCRAFT_HDR").ok().as_deref());
+    // With HDR output asked for, a pen doesn't move the window to Xwayland: Xwayland has no HDR
+    // (the compositor maps its windows to SDR), and HDR is what was asked for.
     #[cfg(target_os = "linux")]
-    let session = tablet::display_session();
+    let session = if hdr_wanted && native_session == linux_libs::DisplaySession::Wayland { native_session } else { tablet::display_session() };
     // Preferences › Performance › Linux display server = X11: Xwayland on a Wayland session too,
     // where native file drops work (winit 0.30 has none on Wayland, #386). Only when Xwayland can
     // run the window ($DISPLAY set, X11 libraries installed); otherwise the session's own.
@@ -389,9 +397,16 @@ fn main() -> eframe::Result {
     }
     // Preferences › Performance › HDR Output: an extended-range linear (scRGB) surface where the
     // platform offers one (KDE Plasma on Wayland with HDR on, Windows HDR, macOS EDR).
-    let hdr_wanted = gpu_startup::read_hdr_output(services::prefs_file().as_deref(), std::env::var("PHOTOCRAFT_HDR").ok().as_deref());
-    if hdr_wanted {
+    // Not on an X11/Xwayland window (Preferences › Performance › Linux display server = X11):
+    // the compositor would accept an scRGB surface there and show it as SDR.
+    #[cfg(target_os = "linux")]
+    let hdr_possible = session != linux_libs::DisplaySession::X11;
+    #[cfg(not(target_os = "linux"))]
+    let hdr_possible = true;
+    if hdr_wanted && hdr_possible {
         options.wgpu_options.hdr = eframe::egui_wgpu::HdrOutput::Auto;
+    } else if hdr_wanted {
+        log::warn!("HDR output: off, the window opens through Xwayland (Preferences › Performance › Linux display server is X11)");
     }
     // Testers' present mode and frame latency overrides (#1343), after the preference.
     let present = presentation::Overrides::from_args_or_env(present_mode, frame_latency);
@@ -674,6 +689,7 @@ mod tests {
     fn hdr_status_says_why_the_window_stayed_sdr() {
         use eframe::wgpu::Backend;
         assert!(super::hdr_status(true, Backend::Vulkan, Some(true)).starts_with("on"));
+        assert!(super::hdr_status(true, Backend::Vulkan, Some(false)).starts_with("off"), "Xwayland shows scRGB as SDR");
         assert!(super::hdr_status(false, Backend::Vulkan, Some(false)).contains("Wayland"));
         assert!(super::hdr_status(false, Backend::Gl, Some(true)).contains("Vulkan"));
         assert!(super::hdr_status(false, Backend::Vulkan, Some(true)).contains("display settings"));
