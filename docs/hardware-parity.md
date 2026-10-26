@@ -9,8 +9,8 @@ strings, Touch Bar resources, pen pressure/tilt strings) and Adobe's GPU FAQ. Ph
 `engine/src/display_color.rs`, `apps/photocraft/src/monitor_profile.rs`.
 
 **Summary (estimated):** ~50% ready. GPU compositing and colour-managed display are solid; pen
-input is uneven by platform (Windows lacks tilt/rotation, Wayland is broken) and there is no HDR
-output. Remaining: 80–150 h (gap G12). Human: tablets (Wacom, XP-Pen, Huion) on each OS and an
+input is uneven by platform (Windows lacks tilt/rotation, Wayland is broken) and HDR output is
+new and opt-in ([hdr.md](hdr.md)). Remaining: 80–150 h (gap G12). Human: tablets (Wacom, XP-Pen, Huion) on each OS and an
 HDR display to verify.
 
 ## GPU
@@ -42,7 +42,7 @@ HDR display to verify.
 |---|---|---|---|
 | Colour-managed canvas (document → monitor profile) | yes | yes, folded into the GPU 3D LUT | done |
 | Monitor profile detection | per display, live | macOS per display at launch; others sRGB or a chosen .icc | partial |
-| HDR / EDR output for 32-bit and HDR images | yes ("Precise Color Management for HDR Display") | no; 8-bit sRGB-encoded canvas texture | missing |
+| HDR / EDR output for 32-bit and HDR images | yes ("Precise Color Management for HDR Display") | yes, opt-in (Preferences › Performance › HDR Output): scRGB surface, unclipped matrix/shaper canvas, headroom roll-off ([hdr.md](hdr.md)); proof/LUT paths stay SDR; needs verifying on HDR displays | partial |
 | High-DPI, physical 100% | yes | yes (#1943) | done |
 | Multiple monitors: documents in separate OS windows | yes | yes (`extra_windows`) | done |
 | Panels in separate OS windows | yes | in-app floating only (UI-217-5) | missing |
