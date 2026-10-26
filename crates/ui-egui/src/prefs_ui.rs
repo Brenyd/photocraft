@@ -69,6 +69,7 @@ pub fn canvas_style(app: &PhotocraftApp) -> crate::gpu_canvas::CanvasStyle {
         checker_dark: f(d),
         gamut_color: f(g),
         gamut_opacity: t.gamut_warning_opacity as f32 / 100.0,
+        hdr_headroom: app.session.prefs().performance.hdr_headroom(),
     }
 }
 
@@ -1293,6 +1294,17 @@ fn humanize(key: &str) -> String {
     if key == "lowLatencyDrawing" {
         return "Low-Latency Drawing (vsync off, applies at next launch)".into();
     }
+    // Performance: HDR output (scRGB surface) and the display's brightness levels, from which
+    // the canvas takes its highlight headroom.
+    if key == "hdrOutput" {
+        return "HDR Output (applies at next launch)".into();
+    }
+    if key == "hdrPeakNits" {
+        return "HDR Peak Brightness (nits)".into();
+    }
+    if key == "hdrSdrWhiteNits" {
+        return "HDR SDR White (nits)".into();
+    }
     // Performance: the canvas compositor's GPU memory, 0 for the automatic budget (L3).
     if key == "gpuMemoryMb" {
         return "GPU Memory (MB, 0 = Automatic)".into();
@@ -1782,6 +1794,8 @@ fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) 
         || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "memoryUsageMb"))
         // The browser presents frames itself: Low-Latency Drawing does nothing there.
         || (cfg!(target_arch = "wasm32") && path == "performance.lowLatencyDrawing")
+        // The browser has no HDR (scRGB) canvas surface.
+        || (cfg!(target_arch = "wasm32") && matches!(path.as_str(), "performance.hdrOutput" | "performance.hdrPeakNits" | "performance.hdrSdrWhiteNits"))
         || (section == "export" && !export_field_visible(obj, k))
         || (section == "tools" && !tools_field_visible(obj, k));
     (query.is_empty() || preference_matches(section, k, query))

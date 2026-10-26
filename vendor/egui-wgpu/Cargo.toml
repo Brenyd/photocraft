@@ -1,0 +1,54 @@
+# Vendored from storytold/egui at 6d518fc799681571963842f95b55a6b68431b15a (crates/egui-wgpu),
+# patched for HDR output: an opt-in extended-range linear (scRGB, Rgba16Float) surface, chosen
+# when the platform offers one (KDE Plasma on Wayland, Windows HDR, macOS EDR). See
+# vendor/egui-wgpu/PATCHES.md. Not a workspace member: it keeps upstream's `unsafe` surface
+# creation, which the workspace's `unsafe_code = "forbid"` would reject.
+[package]
+name = "egui-wgpu"
+version = "0.37.0"
+description = "Bindings for using egui natively using the wgpu library (PhotoCraft HDR patch)"
+authors = [
+  "Nils Hasenbanck <nils@hasenbanck.de>",
+  "embotech <opensource@embotech.com>",
+  "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
+]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/emilk/egui/tree/main/crates/egui-wgpu"
+publish = false
+
+[features]
+default = [
+  "fragile-send-sync-non-atomic-wasm",
+  "macos-window-resize-jitter-fix",
+  "wgpu/default",
+  "wgpu/webgl",
+]
+## Enables the `capture` module for capturing screenshots.
+capture = ["dep:egui"]
+## Enable [`winit`](https://docs.rs/winit) integration. On Linux, requires either `wayland` or `x11`
+winit = ["dep:winit", "winit/rwh_06", "dep:egui", "capture"]
+## Enables Wayland support for winit.
+wayland = ["winit?/wayland"]
+## Enables x11 support for winit.
+x11 = ["winit?/x11"]
+## Make the renderer `Sync` on wasm.
+fragile-send-sync-non-atomic-wasm = ["wgpu/fragile-send-sync-non-atomic-wasm"]
+## Enables the macOS live-resize jitter fix, which uses `present_with_transaction`.
+macos-window-resize-jitter-fix = ["wgpu/metal"]
+
+[dependencies]
+epaint = { version = "0.37.0", default-features = false, features = ["bytemuck"] }
+ahash = { version = "0.8.12", default-features = false, features = ["no-rng", "std"] }
+bytemuck = "1.25"
+document-features = "0.2.12"
+log = { version = "0.4.34", features = ["std"] }
+profiling = { version = "1.0", default-features = false }
+thiserror = "2.0"
+type-map = "0.5.1"
+web-time = "1.1"
+wgpu = { version = "30.0", default-features = false, features = ["std", "wgsl"] }
+egui = { version = "0.37.0", optional = true, default-features = false }
+winit = { version = "0.30.13", optional = true, default-features = false }

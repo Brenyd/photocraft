@@ -222,8 +222,9 @@ pub fn display_at(displays: &[Display], rect: [f64; 4]) -> Option<u32> {
 pub struct MonitorStatus {
     /// Color Settings › Monitor Profile as set: `auto`, a built-in id or an `.icc` path.
     pub requested: String,
-    /// `auto` (the display's own profile), `manual` (the chosen profile) or `fallback` (sRGB,
-    /// because the requested profile isn't available or usable: see `reason`).
+    /// `auto` (the display's own profile), `manual` (the chosen profile), `fallback` (sRGB,
+    /// because the requested profile isn't available or usable: see `reason`) or `hdr` (sRGB
+    /// primaries in scRGB: the window presents HDR and the compositor manages the display).
     pub source: &'static str,
     /// The display this is for (`auto` reads its profile), when known.
     pub display: Option<String>,
@@ -259,9 +260,14 @@ struct MonitorEntry {
     display: Option<u32>,
     icc: Option<Arc<Vec<u8>>>,
     detection: MonitorDetection,
+    /// [`ColorState::hdr_output`] when this was resolved.
+    hdr: bool,
     profile: Arc<Profile>,
     status: MonitorStatus,
 }
+
+/// Why the canvas ends at sRGB in HDR output (the monitor status reason).
+pub const HDR_OUTPUT_REASON: &str = "HDR output: the compositor colour-manages the display (scRGB)";
 
 /// Caches of [`ColorState`] for the display (monitor profiles per display, per-document displays).
 #[derive(Default)]
@@ -345,6 +351,7 @@ impl ColorState {
             && e.spec == spec
             && e.display == shown.map(|d| d.id)
             && e.detection == self.monitor_detection
+            && e.hdr == self.hdr_output
             && match (&e.icc, &icc) {
                 (None, None) => true,
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -353,7 +360,9 @@ impl ColorState {
         {
             return (e.profile.clone(), e.status.clone());
         }
-        let found = if auto {
+        let found = if self.hdr_output {
+            Err(HDR_OUTPUT_REASON.to_string())
+        } else if auto {
             match (shown, &icc, &self.monitor_detection) {
                 (_, Some(b), _) => profile_from_bytes(b).map_err(|e| format!("the display profile can't be read: {e}")),
                 (Some(d), None, _) => Err(format!("{} has no ICC profile", d.name)),
@@ -376,6 +385,7 @@ impl ColorState {
         });
         let (p, source, reason) = match usable {
             Ok(p) => (p, if auto { "auto" } else { "manual" }, None),
+            Err(r) if self.hdr_output => (Arc::new(Builtin::Srgb.profile().clone()), "hdr", Some(r)),
             Err(r) => (Arc::new(Builtin::Srgb.profile().clone()), "fallback", Some(r)),
         };
         let status = MonitorStatus {
@@ -396,6 +406,7 @@ impl ColorState {
             display: shown.map(|d| d.id),
             icc,
             detection: self.monitor_detection.clone(),
+            hdr: self.hdr_output,
             profile: p.clone(),
             status: status.clone(),
         };

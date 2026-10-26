@@ -48,8 +48,8 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
 /// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-const VIEW_UNIFORM_SIZE: u64 = 128;
-const VIEW_FLOATS: usize = 32;
+const VIEW_UNIFORM_SIZE: u64 = 144;
+const VIEW_FLOATS: usize = 36;
 const TILE_UNIFORM_SIZE: u64 = 16;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -166,6 +166,7 @@ impl GpuCanvas {
         let health = photocraft_gpu::DeviceHealth::watch(&rs.device);
         let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off);
         res.health = health.clone();
+        res.hdr_output = rs.target_color_space.is_hdr();
         let info = rs.adapter.get_info();
         res.separate_mip_targets = separate_mip_targets(info.backend, info.vendor, std::env::var("PHOTOCRAFT_SEPARATE_MIPS").ok().as_deref());
         let vram = video_memory(&info);
@@ -173,8 +174,9 @@ impl GpuCanvas {
         let budget = res.canvas_budget.clone();
         rs.renderer.write().callback_resources.insert(res);
         log::info!(
-            "gpu canvas: target {:?}, max texture {max}, tile {tile}, 16F canvas {high:?}, video memory {}",
+            "gpu canvas: target {:?} ({:?}), max texture {max}, tile {tile}, 16F canvas {high:?}, video memory {}",
             rs.target_format,
+            rs.target_color_space,
             vram.map_or_else(|| "unknown".to_owned(), |b| format!("{} MB", b >> 20))
         );
         Self { rs: rs.clone(), tile, high, health, vram, canvas_budget: budget }
@@ -1092,6 +1094,9 @@ pub struct GpuInfo {
     /// Present mode and frame latency ("fifo, latency 2"; launch overrides marked, see the
     /// app's `presentation`). Empty in hosts that don't set it.
     pub present: String,
+    /// The window surface's dynamic range when HDR output was asked for ("HDR (scRGB)", or
+    /// "SDR" and why not). Empty when HDR output is off.
+    pub hdr: String,
 }
 
 impl GpuInfo {
@@ -1180,6 +1185,12 @@ impl GpuInfo {
             v.push({
                 let template = "This session: {reason}";
                 crate::i18n::fmt(tl!(template), &[("reason", l)])
+            });
+        }
+        if !self.hdr.is_empty() {
+            v.push({
+                let template = "HDR output: {state}";
+                crate::i18n::fmt(tl!(template), &[("state", &self.hdr)])
             });
         }
         v
@@ -1583,6 +1594,8 @@ struct Resources {
     docs: HashMap<u64, DocTextures>,
     views: HashMap<u64, ViewGpu>,
     out_linear: bool,
+    /// The window surface is HDR (scRGB): the canvas keeps values above SDR white.
+    hdr_output: bool,
     /// Build each mip level in a scratch texture and copy it back instead of rendering into
     /// the level directly (see [`separate_mip_targets`]).
     separate_mip_targets: bool,
@@ -1625,11 +1638,15 @@ pub struct CanvasStyle {
     pub gamut_color: [f32; 3],
     /// Gamut warning opacity 0..1.
     pub gamut_opacity: f32,
+    /// HDR output only: how many times brighter than SDR white highlights may be shown
+    /// (Preferences › Performance › HDR Peak Brightness / HDR SDR White); brighter values roll
+    /// off smoothly into it. At most 1 shows SDR.
+    pub hdr_headroom: f32,
 }
 
 impl Default for CanvasStyle {
     fn default() -> Self {
-        Self { checker_square: 8.0, checker_light: [1.0; 3], checker_dark: [0.8; 3], gamut_color: [0.5; 3], gamut_opacity: 1.0 }
+        Self { checker_square: 8.0, checker_light: [1.0; 3], checker_dark: [0.8; 3], gamut_color: [0.5; 3], gamut_opacity: 1.0, hdr_headroom: 1000.0 / 203.0 }
     }
 }
 
@@ -1918,7 +1935,8 @@ impl Resources {
             mip_sampler,
             docs: HashMap::new(),
             views: HashMap::new(),
-            out_linear: target.is_srgb(),
+            out_linear: egui_wgpu::writes_linear(target),
+            hdr_output: false,
             separate_mip_targets: false,
             compositor: None,
             compositor_failed: None,
@@ -2210,7 +2228,7 @@ impl CanvasCallback {
         ([ox, oy], scale)
     }
 
-    fn uniforms(&self, screen: [u32; 2], ppp: f32, out_linear: bool, style: &CanvasStyle) -> [f32; VIEW_FLOATS] {
+    fn uniforms(&self, screen: [u32; 2], ppp: f32, out: Output, style: &CanvasStyle) -> [f32; VIEW_FLOATS] {
         let p = &self.params;
         let (origin, scale) = self.placement(ppp);
         let (mode, lod) = filter_mode(scale);
@@ -2241,7 +2259,7 @@ impl CanvasCallback {
             if p.offset[0].is_finite() { p.offset[0] } else { 0.0 },
             if p.offset[1].is_finite() { p.offset[1] } else { 0.0 },
             p.display as f32,
-            if out_linear { 1.0 } else { 0.0 },
+            if out.linear { 1.0 } else { 0.0 },
             l[0],
             l[1],
             l[2],
@@ -2264,8 +2282,21 @@ impl CanvasCallback {
             },
             p.center[0],
             p.center[1],
+            if out.hdr { 1.0 } else { 0.0 },
+            if out.hdr && style.hdr_headroom.is_finite() { style.hdr_headroom.clamp(1.0, 1000.0) } else { 1.0 },
+            0.0,
+            0.0,
         ]
     }
+}
+
+/// What the window surface takes from the canvas shader.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Output {
+    /// Linear light (an sRGB-encoding or float target), not sRGB-encoded values.
+    linear: bool,
+    /// Extended range (scRGB): values above 1.0 are brighter than SDR white.
+    hdr: bool,
 }
 
 impl CallbackTrait for CanvasCallback {
@@ -2281,7 +2312,8 @@ impl CallbackTrait for CanvasCallback {
         if !res.health.is_ok() {
             return Vec::new();
         }
-        let data = self.uniforms(screen.size_in_pixels, screen.pixels_per_point, res.out_linear, &res.style);
+        let out = Output { linear: res.out_linear, hdr: res.hdr_output && res.out_linear };
+        let data = self.uniforms(screen.size_in_pixels, screen.pixels_per_point, out, &res.style);
         let (bgl, sampler) = (&res.view_bgl, &res.sampler);
         let v = res.views.entry(self.params.view_key).or_insert_with(|| {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2361,6 +2393,7 @@ struct View {
     f: vec4<f32>, // checker dark rgb, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
+    i: vec4<f32>, // HDR output (scRGB surface), HDR headroom (x SDR white), unused, unused
 };
 struct Tile { r: vec4<f32> }; // x, y, w, h in doc px
 
@@ -2441,6 +2474,49 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let hi = 1.055 * pow(max(c, vec3(1e-12)), vec3(1.0 / 2.4)) - 0.055;
     return select(hi, c * 12.92, c <= vec3(0.0031308));
+}
+
+// --- HDR output (scRGB surface) ------------------------------------------------------------
+
+fn hdr_out() -> bool { return view.i.x > 0.5; }
+
+// The sRGB curves continued past 1.0 and mirrored below 0.0 (IEC 61966-2-2's extended range).
+fn srgb_decode_ext(c: vec3<f32>) -> vec3<f32> { return sign(c) * srgb_to_linear(abs(c)); }
+fn srgb_encode_ext(c: vec3<f32>) -> vec3<f32> { return sign(c) * linear_to_srgb(abs(c)); }
+
+// The matrix/shaper's input curve with values beyond 1.0 kept: up to 1.0 the table, past it the
+// table's top scaled along the sRGB curve (exact for the sRGB-encoded linear composites that
+// carry HDR values; see display_color.rs), mirrored below 0.0.
+fn display_curve_ext(c: vec3<f32>) -> vec3<f32> {
+    let a = abs(c);
+    let inside = display_curve(a, 0u, 4096.0);
+    let beyond = curve_entry(4096u) * srgb_to_linear(a);
+    return sign(c) * select(inside, beyond, a > vec3(1.0));
+}
+
+// Document values to linear display light without clipping: the input curves and the matrix of
+// the display transform, whose destination in HDR output is sRGB, so its linear light is scRGB.
+fn matrix_display_hdr(c: vec3<f32>) -> vec3<f32> {
+    let v = vec4(display_curve_ext(c), 1.0);
+    return vec3(dot(display_matrix.r, v), dot(display_matrix.g, v), dot(display_matrix.b, v));
+}
+
+// Linear light at most 1.0 + nothing above the display's headroom `h`: untouched up to a knee at
+// three quarters of the headroom (never below SDR white), then rolled off with matching slope
+// so highlights approach `h` without a hard clip. Scales the whole colour by its largest
+// component, keeping hue.
+fn hdr_tonemap(c: vec3<f32>, h: f32) -> vec3<f32> {
+    if (h <= 1.0) {
+        return min(c, vec3(1.0));
+    }
+    let m = max(max(c.r, c.g), c.b);
+    let k = max(1.0, 0.75 * h);
+    if (m <= k) {
+        return c;
+    }
+    let r = h - k;
+    let mapped = k + r * (1.0 - exp(-(m - k) / r));
+    return c * (mapped / m);
 }
 
 // --- drop shadow ---------------------------------------------------------------------------
@@ -2537,15 +2613,21 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
         // are brought into range by the exposure instead of clipped.
         let lin = srgb_to_linear(max(col.rgb / col.a, vec3(0.0))) * view.f.w;
-        let v = linear_to_srgb(min(pow(max(lin, vec3(1e-12)), vec3(view.g.w)), vec3(1.0)));
+        let curved = pow(max(lin, vec3(1e-12)), vec3(view.g.w));
+        // HDR output shows what the exposure lifts above white; SDR clips it.
+        let v = linear_to_srgb(select(min(curved, vec3(1.0)), curved, hdr_out()));
         col = vec4(v * col.a, col.a);
     }
     if (view.d.z > 0.5 && col.a > 0.0) {
         // Colour management, Proof Colors, Gamut Warning: the document's display LUT (alpha flags
         // out-of-gamut colours).
-        let c = clamp(col.rgb / col.a, vec3(0.0), vec3(1.0));
+        let raw = col.rgb / col.a;
+        let c = clamp(raw, vec3(0.0), vec3(1.0));
         var shown: vec3<f32>;
-        if (view.d.z > 2.5) {
+        if (view.d.z > 2.5 && hdr_out()) {
+            // HDR output: linear scRGB, kept sRGB-encoded (extended) until the final decode.
+            shown = srgb_encode_ext(matrix_display_hdr(raw));
+        } else if (view.d.z > 2.5) {
             shown = matrix_display(c);
         } else {
             let n = f32(textureDimensions(lut).x);
@@ -2553,6 +2635,11 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
             shown = select(l.rgb, mix(l.rgb, view.g.xyz, view.e.w), view.d.z > 1.5 && l.a > 0.5);
         }
         col = vec4(shown * col.a, col.a);
+    }
+    if (hdr_out() && col.a > 0.0) {
+        // Highlights into the display's headroom (the values above stay sRGB-encoded here).
+        let lin = hdr_tonemap(srgb_decode_ext(col.rgb / col.a), view.i.y);
+        col = vec4(srgb_encode_ext(lin) * col.a, col.a);
     }
     var rgb = col.rgb + checker(d) * (1.0 - col.a);
     // The pixel grid is drawn over pixels with content, not over empty checker.
@@ -2570,7 +2657,7 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         }
     }
     if (view.d.w > 0.5) {
-        rgb = srgb_to_linear(rgb);
+        rgb = srgb_decode_ext(rgb);
     }
     return vec4(rgb, 1.0);
 }
@@ -2816,6 +2903,45 @@ mod tests {
         assert_eq!(none.len() + 1, lines.len());
     }
 
+    /// System Info says whether HDR output is on only when it was asked for.
+    #[test]
+    fn system_info_reports_hdr_output_when_asked_for() {
+        let off = GpuInfo::default().lines();
+        assert!(off.iter().all(|l| !l.starts_with("HDR output")), "{off:?}");
+        let on = GpuInfo { hdr: "HDR (scRGB, headroom 4.9×)".into(), ..Default::default() }.lines();
+        assert_eq!(on.last().map(String::as_str), Some("HDR output: HDR (scRGB, headroom 4.9×)"));
+    }
+
+    /// The canvas passes the HDR flags and headroom to the shader, and SDR output never asks
+    /// for more than white.
+    #[test]
+    fn hdr_uniforms_follow_the_output() {
+        let cb = CanvasCallback {
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0)),
+            params: ViewParams {
+                doc: 1,
+                doc_size: [10, 10],
+                zoom: 1.0,
+                center: [5.0, 5.0],
+                rotation: 0.0,
+                shadow: false,
+                pixel_grid: false,
+                view_key: 1,
+                display: 3,
+                output: 0,
+                hdr: None,
+                offset: [0.0, 0.0],
+            },
+        };
+        let style = CanvasStyle { hdr_headroom: 4.0, ..Default::default() };
+        let sdr = cb.uniforms([100, 100], 1.0, Output { linear: false, hdr: false }, &style);
+        assert_eq!((sdr[15], sdr[32], sdr[33]), (0.0, 0.0, 1.0));
+        let hdr = cb.uniforms([100, 100], 1.0, Output { linear: true, hdr: true }, &style);
+        assert_eq!((hdr[15], hdr[32], hdr[33]), (1.0, 1.0, 4.0));
+        let wild = CanvasStyle { hdr_headroom: f32::NAN, ..style };
+        assert_eq!(cb.uniforms([100, 100], 1.0, Output { linear: true, hdr: true }, &wild)[33], 1.0);
+    }
+
     /// The Linux reader finds the card by its PCI ids in a `/sys/class/drm`-shaped folder and reads
     /// amdgpu's VRAM size; a card without one, unreadable ids or a malformed size give nothing.
     #[test]
@@ -2883,8 +3009,8 @@ mod tests {
 
     #[test]
     fn view_uniform_packs_rotation() {
-        assert_eq!(VIEW_FLOATS, 32);
-        assert_eq!(VIEW_UNIFORM_SIZE, 128);
+        assert_eq!(VIEW_FLOATS, 36);
+        assert_eq!(VIEW_UNIFORM_SIZE, 144);
         assert_eq!(VIEW_FLOATS * 4, VIEW_UNIFORM_SIZE as usize);
         assert!(gpu_view_ok(false, 0.0, 1.0));
         assert!(gpu_view_ok(false, 45.0_f32.to_radians(), 1.0));

@@ -455,3 +455,24 @@ fn parallel_plain_quantize_matches_the_scalar_rounding() {
         assert_eq!(*o, p.map(q), "{p:?}");
     }
 }
+
+/// HDR output: the compositor manages the display, so even a wide-gamut display profile read for
+/// `auto` (or one chosen by hand) is left alone and the canvas ends at sRGB (scRGB), saying why.
+#[test]
+fn hdr_output_ends_the_canvas_at_srgb() {
+    let mut s = Session::new();
+    s.color.set_displays(Ok(vec![display(7, [0.0, 0.0, 100.0, 100.0], p3())]));
+    let status = |s: &mut Session| s.execute("edit.colorSettings", json!({})).unwrap()["monitorStatus"].clone();
+    assert_eq!(status(&mut s)["source"], "auto");
+    assert_ne!(s.color.monitor().content_hash(), Builtin::Srgb.profile().content_hash());
+
+    s.color.hdr_output = true;
+    let st = status(&mut s);
+    assert_eq!(st["source"], "hdr", "{st}");
+    assert_eq!(st["reason"].as_str(), Some(crate::display_color::HDR_OUTPUT_REASON));
+    assert_eq!(s.color.monitor().content_hash(), Builtin::Srgb.profile().content_hash());
+
+    // Back to SDR: the display's own profile again (the cache notices the switch).
+    s.color.hdr_output = false;
+    assert_eq!(status(&mut s)["source"], "auto");
+}

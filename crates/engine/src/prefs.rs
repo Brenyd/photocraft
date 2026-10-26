@@ -575,6 +575,19 @@ pub struct Performance {
     /// missing. Frames are capped at 240 fps. Off (the default): vsync, smooth but late. Desktop
     /// only.
     pub low_latency_drawing: bool,
+    /// HDR output (applies at next launch): the window presents to an extended-range linear
+    /// (scRGB) surface where the platform offers one (KDE Plasma 6 on Wayland with HDR on for
+    /// the screen, Windows with HDR on, macOS EDR displays), so 16- and 32-bit documents show
+    /// highlights brighter than white instead of clipping them. The compositor then manages the
+    /// display's colour, so the canvas ends at sRGB/scRGB rather than a monitor ICC profile.
+    /// Off (the default), or where the surface has no HDR mode: SDR, as before. Desktop only.
+    pub hdr_output: bool,
+    /// The brightest the display shows in HDR, in nits (cd/m²); with
+    /// [`Performance::hdr_sdr_white_nits`] it sets how far highlights may go above white
+    /// (headroom = peak / SDR white). On KDE Plasma: System Settings › Display › Peak brightness.
+    pub hdr_peak_nits: u32,
+    /// What SDR white is shown at in HDR, in nits (KDE Plasma: the SDR brightness slider).
+    pub hdr_sdr_white_nits: u32,
     /// Linux display server (applies at next launch; see [`LinuxDisplayServer`]).
     pub linux_display_server: LinuxDisplayServer,
     /// GPU memory the canvas compositor may hold for layer pages and effect maps, in MB; 0 is
@@ -590,6 +603,16 @@ impl Performance {
     /// Resolve old preferences without allowing legacy flags to override an explicit mode.
     pub fn effective_rendering_mode(&self) -> RenderingMode {
         self.rendering_mode.unwrap_or_else(|| if !self.use_gpu || self.gpu_backend == GpuBackend::Cpu { RenderingMode::Cpu } else { RenderingMode::Auto })
+    }
+
+    /// HDR headroom: how many times brighter than SDR white the canvas may show highlights,
+    /// from [`Performance::hdr_peak_nits`] over [`Performance::hdr_sdr_white_nits`] (at least
+    /// 1: never dimmer than SDR). Out-of-range values (a hand-edited preferences file) are
+    /// clamped to the preferences' ranges.
+    pub fn hdr_headroom(&self) -> f32 {
+        let peak = self.hdr_peak_nits.clamp(80, 10_000) as f32;
+        let white = self.hdr_sdr_white_nits.clamp(40, 1_000) as f32;
+        (peak / white).max(1.0)
     }
 
     /// Pixel memory a document and its History may hold (Memory Usage), in bytes: beyond it
@@ -613,6 +636,9 @@ impl Default for Performance {
             gpu_adapter: String::new(),
             low_resolution_previews: true,
             low_latency_drawing: false,
+            hdr_output: false,
+            hdr_peak_nits: 1000,
+            hdr_sdr_white_nits: 203,
             linux_display_server: LinuxDisplayServer::Auto,
             gpu_memory_mb: 0,
             effect_cache_mb: 768,
@@ -1210,6 +1236,8 @@ pub fn range(path: &str) -> Option<(f64, f64)> {
         "export.jpegQuality" | "export.webpQuality" => (1.0, 100.0),
         "performance.memoryUsageMb" => (256.0, 1_048_576.0),
         "performance.gpuMemoryMb" => (0.0, 1_048_576.0),
+        "performance.hdrPeakNits" => (80.0, 10_000.0),
+        "performance.hdrSdrWhiteNits" => (40.0, 1_000.0),
         "performance.historyStates" => (1.0, 1000.0),
         "performance.cacheLevels" => (1.0, 8.0),
         "performance.cacheTileSize" => (256.0, 16384.0),

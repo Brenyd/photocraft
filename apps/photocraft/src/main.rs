@@ -97,6 +97,24 @@ fn custom_titlebar(prefs_file: Option<&std::path::Path>) -> bool {
 /// `centered`, Windows cascades each new window from the top-left corner, so it opened at a
 /// different offset every launch (#419). A later launch restores the saved position instead
 /// (`main` turns `centered` off, #4826). Wayland compositors place windows themselves.
+/// System Info's HDR output line (when HDR output was asked for): on, or why the window stayed
+/// SDR. `wayland` is `Some` on Linux (whether the window is a native Wayland one).
+fn hdr_status(active: bool, backend: eframe::wgpu::Backend, wayland: Option<bool>) -> String {
+    if active {
+        return "on (scRGB, extended-range linear)".into();
+    }
+    let why = if wayland == Some(false) {
+        "HDR needs a Wayland session (this window is on X11 or Xwayland)"
+    } else if wayland.is_some() && backend != eframe::wgpu::Backend::Vulkan {
+        "HDR needs the Vulkan backend (Preferences › Performance › Graphics Backend)"
+    } else if backend == eframe::wgpu::Backend::Gl {
+        "the OpenGL backend has no HDR surface"
+    } else {
+        "the display offers no HDR surface (turn HDR on for this screen in the system's display settings)"
+    };
+    format!("off: {why}")
+}
+
 fn native_options(custom_titlebar: bool) -> eframe::NativeOptions {
     let viewport = egui::ViewportBuilder::default().with_icon(app_icon::viewport_icon(std::env::current_exe().ok().as_deref()));
     eframe::NativeOptions {
@@ -369,6 +387,12 @@ fn main() -> eframe::Result {
     if gpu_startup::read_low_latency(services::prefs_file().as_deref()) {
         options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
     }
+    // Preferences › Performance › HDR Output: an extended-range linear (scRGB) surface where the
+    // platform offers one (KDE Plasma on Wayland with HDR on, Windows HDR, macOS EDR).
+    let hdr_wanted = gpu_startup::read_hdr_output(services::prefs_file().as_deref(), std::env::var("PHOTOCRAFT_HDR").ok().as_deref());
+    if hdr_wanted {
+        options.wgpu_options.hdr = eframe::egui_wgpu::HdrOutput::Auto;
+    }
     // Testers' present mode and frame latency overrides (#1343), after the preference.
     let present = presentation::Overrides::from_args_or_env(present_mode, frame_latency);
     options.wgpu_options.surface = present.apply(options.wgpu_options.surface);
@@ -460,6 +484,14 @@ fn main() -> eframe::Result {
             info.canvas = "cpu".into();
             if let Some(rs) = cc.wgpu_render_state.clone() {
                 app.perf.gpu_info.set_adapter(&rs.adapter.get_info());
+                // HDR output: the compositor manages the display's colour, so the canvas ends at
+                // sRGB primaries in scRGB (`ColorState::hdr_output`).
+                let hdr_active = rs.target_color_space.is_hdr();
+                app.session.color.hdr_output = hdr_active;
+                if hdr_wanted {
+                    app.perf.gpu_info.hdr = hdr_status(hdr_active, rs.adapter.get_info().backend, cfg!(target_os = "linux").then_some(app.services.is_wayland));
+                    log::info!("HDR output: {}", app.perf.gpu_info.hdr);
+                }
                 app.perf.gpu_info.set_available(&rs.available_adapters);
                 // Every egui texture uploads through this adapter, whichever canvas draws:
                 // Iris Xe on DX12 shows stale memory in all-zero texels (texel_guard.rs).
@@ -638,6 +670,17 @@ pub(crate) fn no_child_spawns() -> std::sync::RwLockWriteGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hdr_status_says_why_the_window_stayed_sdr() {
+        use eframe::wgpu::Backend;
+        assert!(super::hdr_status(true, Backend::Vulkan, Some(true)).starts_with("on"));
+        assert!(super::hdr_status(false, Backend::Vulkan, Some(false)).contains("Wayland"));
+        assert!(super::hdr_status(false, Backend::Gl, Some(true)).contains("Vulkan"));
+        assert!(super::hdr_status(false, Backend::Vulkan, Some(true)).contains("display settings"));
+        assert!(super::hdr_status(false, Backend::Dx12, None).contains("display settings"));
+        assert!(super::hdr_status(false, Backend::Gl, None).contains("OpenGL"));
+    }
+
     #[test]
     fn window_and_panel_geometry_survive_a_restart() {
         let options = super::native_options(super::CUSTOM_TITLEBAR);

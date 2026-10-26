@@ -1018,3 +1018,23 @@ fn a_wrongly_typed_section_or_colour_setting_resets_only_that_part() {
     assert!(s.load_prefs_json(&deep).is_ok());
     assert!(s.load_prefs_json(r#"{"interface": {"theme": 3, "uiScale": [1]}, "workspaces": {"x": 1}, "menus": 1}"#).is_ok());
 }
+
+#[test]
+fn hdr_output_is_off_by_default_and_headroom_comes_from_the_two_brightnesses() {
+    let p = Performance::default();
+    assert!(!p.hdr_output, "HDR output is opt-in");
+    assert!((p.hdr_headroom() - 1000.0 / 203.0).abs() < 1e-4);
+    let mut q = p.clone();
+    q.hdr_peak_nits = 600;
+    q.hdr_sdr_white_nits = 300;
+    assert!((q.hdr_headroom() - 2.0).abs() < 1e-6);
+    // Never below SDR, and hand-edited extremes stay in the preferences' ranges.
+    q.hdr_peak_nits = 100;
+    q.hdr_sdr_white_nits = 400;
+    assert_eq!(q.hdr_headroom(), 1.0);
+    q.hdr_peak_nits = u32::MAX;
+    q.hdr_sdr_white_nits = 0;
+    assert!((q.hdr_headroom() - 10_000.0 / 40.0).abs() < 1e-3);
+    assert_eq!(range("performance.hdrPeakNits"), Some((80.0, 10_000.0)));
+    assert_eq!(range("performance.hdrSdrWhiteNits"), Some((40.0, 1_000.0)));
+}

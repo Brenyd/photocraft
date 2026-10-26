@@ -557,6 +557,20 @@ pub fn read_low_latency(path: Option<&Path>) -> bool {
     v.get("performance").and_then(|p| p.get("lowLatencyDrawing")).and_then(Value::as_bool).unwrap_or(default)
 }
 
+/// Preferences › Performance › HDR Output (`performance.hdrOutput`, off unless set), read before
+/// the window opens like Low-Latency Drawing. `PHOTOCRAFT_HDR` (`1`/`on` or `0`/`off`, for one
+/// launch) wins over it; any other value of it is ignored.
+pub fn read_hdr_output(path: Option<&Path>, env: Option<&str>) -> bool {
+    match env.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "on" | "true" | "yes") => return true,
+        Some("0" | "off" | "false" | "no") => return false,
+        _ => {}
+    }
+    let v: Value = path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let default = photocraft_engine::prefs::Preferences::default().performance.hdr_output;
+    v.get("performance").and_then(|p| p.get("hdrOutput")).and_then(Value::as_bool).unwrap_or(default)
+}
+
 /// Read the policy leniently at startup, including old settings without renderingMode.
 pub fn read_rendering_prefs(path: Option<&Path>) -> (GpuBackend, RenderingMode) {
     let v: Value = path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
@@ -575,6 +589,26 @@ mod tests {
 
     fn crashed(backend: &str, adapter_backend: &str) -> Marker {
         Marker { backend: backend.into(), adapter: "Intel(R) UHD Graphics".into(), adapter_backend: adapter_backend.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn hdr_output_is_read_before_the_window_opens_and_the_variable_wins() {
+        let dir = std::env::temp_dir().join(format!("photocraft-hdr-pref-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("prefs.json");
+        let read = |json: &str, env: Option<&str>| {
+            std::fs::write(&file, json).unwrap();
+            read_hdr_output(Some(&file), env)
+        };
+        assert!(!read("{}", None), "off by default");
+        assert!(read(r#"{"performance":{"hdrOutput":true}}"#, None));
+        assert!(!read(r#"{"performance":{"hdrOutput":"yes please"}}"#, None), "garbage keeps the default");
+        assert!(read("{}", Some("1")));
+        assert!(read("{}", Some(" On ")));
+        assert!(!read(r#"{"performance":{"hdrOutput":true}}"#, Some("off")));
+        assert!(read(r#"{"performance":{"hdrOutput":true}}"#, Some("maybe")), "a bad variable is ignored");
+        assert!(!read_hdr_output(None, None), "no preferences file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
