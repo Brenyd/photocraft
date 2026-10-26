@@ -39,29 +39,36 @@ jobs:
           if ! cargo metadata --locked --format-version 1 > /dev/null; then
             echo "::warning::Cargo.lock needed an update; the fixed lock is in the job log and the artifact"
             cargo metadata --format-version 1 > /dev/null
-            git diff Cargo.lock
+            git diff Cargo.lock | head -c 3800 | python3 -c 'import sys; print("::warning title=Cargo.lock diff::" + sys.stdin.read().replace("%", "%25").replace("\n", "%0A"))'
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: cargo-lock
           path: Cargo.lock
       - name: Format
-        run: cargo fmt --all --check
+        run: .github/scripts/annotate.sh cargo fmt --all --check
       - name: Build the app
-        run: cargo build -p photocraft
+        continue-on-error: true
+        run: .github/scripts/annotate.sh cargo build -p photocraft
       - name: Tests (patched egui-wgpu)
-        run: cargo test -p egui-wgpu --lib
+        if: always()
+        run: .github/scripts/annotate.sh cargo test -p egui-wgpu --lib
       - name: Tests (engine colour and preferences)
-        run: cargo test -p photocraft-engine --lib -- prefs display_color hdr
+        if: always()
+        run: .github/scripts/annotate.sh cargo test -p photocraft-engine --lib -- prefs display_color hdr
       - name: Tests (canvas and app)
+        if: always()
         run: |
-          cargo test -p photocraft-ui-egui --lib -- gpu_canvas prefs_ui monitor_status
-          cargo test -p photocraft --bins -- hdr gpu_startup
+          .github/scripts/annotate.sh cargo test -p photocraft-ui-egui --lib -- gpu_canvas prefs_ui monitor_status
+          .github/scripts/annotate.sh cargo test -p photocraft --bins -- hdr gpu_startup
       - name: Clippy
-        run: cargo clippy -p photocraft-engine -p photocraft-ui-egui -p photocraft --all-targets -- -D warnings
+        if: always()
+        run: .github/scripts/annotate.sh cargo clippy -p photocraft-engine -p photocraft-ui-egui -p photocraft --all-targets -- -D warnings
       - name: Layers
-        run: cargo xtask layers
+        if: always()
+        run: .github/scripts/annotate.sh cargo xtask layers
       - name: Web build still compiles
+        if: always()
         run: |
           rustup target add wasm32-unknown-unknown
-          cargo check -p photocraft-ui-egui --target wasm32-unknown-unknown
+          .github/scripts/annotate.sh cargo check -p photocraft-ui-egui --target wasm32-unknown-unknown
